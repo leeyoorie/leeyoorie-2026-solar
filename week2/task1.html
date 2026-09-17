@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebGL Solar System</title>
+  <style>
+    :root {
+      --bg1: #040814;
+      --bg2: #0b1222;
+      --text: #dfe9ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at center, var(--bg2), var(--bg1) 60%);
+      color: var(--text);
+      font-family: Arial, sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: radial-gradient(circle at center, #09142b, #030712 60%);
+    }
+
+    .title {
+      position: fixed;
+      top: 18px;
+      left: 20px;
+      z-index: 10;
+      font-size: 14px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.7);
+      user-select: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">Solar System</div>
+  <canvas id="glCanvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('glCanvas');
+    const gl = canvas.getContext('webgl2', { antialias: true });
+
+    if (!gl) {
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:white;font-family:sans-serif;">WebGL2를 지원하지 않는 브라우저입니다.</div>';
+      throw new Error('WebGL2 not supported');
+    }
+
+    const vertexShaderSource = `#version 300 es
+      precision highp float;
+
+      in vec3 aPosition;
+      in vec3 aNormal;
+
+      uniform mat4 uModel;
+      uniform mat4 uView;
+      uniform mat4 uProjection;
+
+      out vec3 vNormal;
+      out vec3 vWorldPos;
+
+      void main() {
+        vec4 worldPos = uModel * vec4(aPosition, 1.0);
+        vWorldPos = worldPos.xyz;
+        vNormal = mat3(uModel) * aNormal;
+        gl_Position = uProjection * uView * worldPos;
+      }
+    `;
+
+    const fragmentShaderSource = `#version 300 es
+      precision highp float;
+
+      uniform vec3 uBaseColor;
+      uniform vec3 uCameraPos;
+      uniform float uShininess;
+      uniform float uGlow;
+
+      in vec3 vNormal;
+      in vec3 vWorldPos;
+
+      out vec4 outColor;
+
+      void main() {
+        vec3 normal = normalize(vNormal);
+        vec3 lightPos = vec3(0.0, 0.0, 0.0);
+        vec3 lightDir = normalize(lightPos - vWorldPos);
+
+        float diff = max(dot(normal, lightDir), 0.0);
+        vec3 ambient = uBaseColor * 0.25;
+        vec3 diffuse = uBaseColor * diff;
+
+        vec3 viewDir = normalize(uCameraPos - vWorldPos);
+        vec3 halfDir = normalize(lightDir + viewDir);
+        float spec = pow(max(dot(normal, halfDir), 0.0), uShininess);
+
+        vec3 color = ambient + diffuse + spec * vec3(1.0, 1.0, 1.0);
+
+        if (uGlow > 0.5) {
+          color += uBaseColor * 0.35;
+        }
+
+        outColor = vec4(color, 1.0);
+      }
+    `;
+
+    function compileShader(type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        throw new Error('Shader compile failed');
+      }
+      return shader;
+    }
+
+    function createProgram(vertexSource, fragmentSource) {
+      const program = gl.createProgram();
+      const vs = compileShader(gl.VERTEX_SHADER, vertexSource);
+      const fs = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program));
+        throw new Error('Program link failed');
+      }
+
+      return program;
+    }
+
+    function createSphere(radius = 1, latSegments = 32, lonSegments = 48) {
+      const positions = [];
+      const normals = [];
+      const indices = [];
+
+      for (let lat = 0; lat <= latSegments; lat++) {
+        const v = lat / latSegments;
+        const theta = v * Math.PI;
+        const sinTheta = Math.sin(theta);
+        const cosTheta = Math.cos(theta);
+
+        for (let lon = 0; lon <= lonSegments; lon++) {
+          const u = lon / lonSegments;
+          const phi = u * Math.PI * 2;
+          const sinPhi = Math.sin(phi);
+          const cosPhi = Math.cos(phi);
+
+          const x = cosPhi * sinTheta;
+          const y = cosTheta;
+          const z = sinPhi * sinTheta;
+
+          positions.push(x * radius, y * radius, z * radius);
+          normals.push(x, y, z);
+        }
+      }
+
+      for (let lat = 0; lat < latSegments; lat++) {
+        for (let lon = 0; lon < lonSegments; lon++) {
+          const a = lat * (lonSegments + 1) + lon;
+          const b = a + lonSegments + 1;
+
+          indices.push(a, b, a + 1);
+          indices.push(b, b + 1, a + 1);
+        }
+      }
+
+      return { positions, normals, indices };
+    }
+
+    function createMesh(geometry) {
+      const vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+
+      const positionBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geometry.positions), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+      const normalBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(geometry.normals), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+
+      const indexBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(geometry.indices), gl.STATIC_DRAW);
+
+      gl.bindVertexArray(null);
+
+      return {
+        vao,
+        indexCount: geometry.indices.length,
+      };
+    }
+
+    function mat4Identity() {
+      return new Float32Array([
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1,
+      ]);
+    }
+
+    function mat4Multiply(a, b) {
+      const out = new Float32Array(16);
+      for (let row = 0; row < 4; row++) {
+        for (let col = 0; col < 4; col++) {
+          out[row * 4 + col] =
+            a[row * 4 + 0] * b[0 * 4 + col] +
+            a[row * 4 + 1] * b[1 * 4 + col] +
+            a[row * 4 + 2] * b[2 * 4 + col] +
+            a[row * 4 + 3] * b[3 * 4 + col];
+        }
+      }
+      return out;
+    }
+
+    function mat4Perspective(fovY, aspect, near, far) {
+      const f = 1.0 / Math.tan(fovY / 2);
+      const nf = 1 / (near - far);
+      return new Float32Array([
+        f / aspect, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (far + near) * nf, -1,
+        0, 0, (2 * far * near) * nf, 0,
+      ]);
+    }
+
+    function mat4LookAt(eye, center, up) {
+      const zAxis = normalize(subtract(eye, center));
+      const xAxis = normalize(cross(up, zAxis));
+      const yAxis = cross(zAxis, xAxis);
+
+      return new Float32Array([
+        xAxis[0], yAxis[0], zAxis[0], 0,
+        xAxis[1], yAxis[1], zAxis[1], 0,
+        xAxis[2], yAxis[2], zAxis[2], 0,
+        -dot(xAxis, eye), -dot(yAxis, eye), -dot(zAxis, eye), 1,
+      ]);
+    }
+
+    function mat4Translation(x, y, z) {
+      return new Float32Array([
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        x,y,z,1,
+      ]);
+    }
+
+    function mat4Scale(x, y, z) {
+      return new Float32Array([
+        x,0,0,0,
+        0,y,0,0,
+        0,0,z,0,
+        0,0,0,1,
+      ]);
+    }
+
+    function mat4RotationY(angle) {
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      return new Float32Array([
+        c, 0, s, 0,
+        0, 1, 0, 0,
+        -s, 0, c, 0,
+        0, 0, 0, 1,
+      ]);
+    }
+
+    function mat4RotationX(angle) {
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      return new Float32Array([
+        1, 0, 0, 0,
+        0, c, -s, 0,
+        0, s, c, 0,
+        0, 0, 0, 1,
+      ]);
+    }
+
+    function subtract(a, b) {
+      return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    }
+
+    function cross(a, b) {
+      return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+      ];
+    }
+
+    function dot(a, b) {
+      return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    function normalize(v) {
+      const len = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0] / len, v[1] / len, v[2] / len];
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.floor(window.innerWidth * dpr);
+      const height = Math.floor(window.innerHeight * dpr);
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+
+    const program = createProgram(vertexShaderSource, fragmentShaderSource);
+    const sphereGeometry = createSphere(1, 24, 48);
+    const sphereMesh = createMesh(sphereGeometry);
+
+    const bodies = [
+      { name: 'Sun', radius: 1.4, orbitRadius: 0, orbitSpeed: 0, rotationSpeed: 0.7, color: [1.0, 0.68, 0.15], glow: 1.0, shininess: 8.0 },
+      { name: 'Mercury', radius: 0.18, orbitRadius: 2.4, orbitSpeed: 1.8, rotationSpeed: 2.8, color: [0.8, 0.74, 0.66], glow: 0.0, shininess: 12.0 },
+      { name: 'Venus', radius: 0.22, orbitRadius: 3.4, orbitSpeed: 1.35, rotationSpeed: 2.2, color: [0.95, 0.78, 0.48], glow: 0.0, shininess: 18.0 },
+      { name: 'Earth', radius: 0.24, orbitRadius: 4.7, orbitSpeed: 1.0, rotationSpeed: 3.1, color: [0.33, 0.57, 1.0], glow: 0.0, shininess: 20.0 },
+      { name: 'Mars', radius: 0.2, orbitRadius: 6.1, orbitSpeed: 0.82, rotationSpeed: 2.6, color: [0.9, 0.31, 0.18], glow: 0.0, shininess: 12.0 },
+      { name: 'Jupiter', radius: 0.55, orbitRadius: 8.3, orbitSpeed: 0.55, rotationSpeed: 1.7, color: [0.88, 0.68, 0.51], glow: 0.0, shininess: 10.0 },
+      { name: 'Saturn', radius: 0.45, orbitRadius: 10.7, orbitSpeed: 0.45, rotationSpeed: 1.4, color: [0.93, 0.83, 0.66], glow: 0.0, shininess: 12.0 },
+      { name: 'Uranus', radius: 0.32, orbitRadius: 13.0, orbitSpeed: 0.34, rotationSpeed: 1.2, color: [0.57, 0.84, 0.9], glow: 0.0, shininess: 14.0 },
+      { name: 'Neptune', radius: 0.31, orbitRadius: 15.0, orbitSpeed: 0.28, rotationSpeed: 1.0, color: [0.22, 0.48, 0.9], glow: 0.0, shininess: 15.0 },
+    ];
+
+    const uniforms = {
+      model: gl.getUniformLocation(program, 'uModel'),
+      view: gl.getUniformLocation(program, 'uView'),
+      projection: gl.getUniformLocation(program, 'uProjection'),
+      baseColor: gl.getUniformLocation(program, 'uBaseColor'),
+      cameraPos: gl.getUniformLocation(program, 'uCameraPos'),
+      shininess: gl.getUniformLocation(program, 'uShininess'),
+      glow: gl.getUniformLocation(program, 'uGlow'),
+    };
+
+    function drawBody(body, t) {
+      const orbitAngle = body.orbitRadius === 0 ? 0 : (t * body.orbitSpeed * 0.6) + body.name.length;
+      const planetAngle = t * body.rotationSpeed * 1.8;
+
+      let model = mat4Identity();
+
+      if (body.orbitRadius > 0) {
+        const orbit = mat4Translation(Math.cos(orbitAngle) * body.orbitRadius, 0, Math.sin(orbitAngle) * body.orbitRadius);
+        const spin = mat4RotationY(planetAngle);
+        model = mat4Multiply(orbit, spin);
+      } else {
+        model = mat4RotationY(planetAngle);
+      }
+
+      const scale = mat4Scale(body.radius, body.radius, body.radius);
+      model = mat4Multiply(model, scale);
+
+      gl.uniformMatrix4fv(uniforms.model, false, model);
+      gl.uniform3fv(uniforms.baseColor, new Float32Array(body.color));
+      gl.uniform1f(uniforms.shininess, body.shininess);
+      gl.uniform1f(uniforms.glow, body.glow);
+
+      gl.bindVertexArray(sphereMesh.vao);
+      gl.drawElements(gl.TRIANGLES, sphereMesh.indexCount, gl.UNSIGNED_SHORT, 0);
+    }
+
+    function render(now) {
+      resizeCanvas();
+      const time = now * 0.001;
+
+      gl.clearColor(0.02, 0.03, 0.08, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+
+      gl.useProgram(program);
+
+      const cameraPos = [0, 4.5, 20];
+      const view = mat4LookAt(cameraPos, [0, 0, 0], [0, 1, 0]);
+      const projection = mat4Perspective(Math.PI / 3.2, canvas.width / canvas.height, 0.1, 100);
+
+      gl.uniformMatrix4fv(uniforms.view, false, view);
+      gl.uniformMatrix4fv(uniforms.projection, false, projection);
+      gl.uniform3fv(uniforms.cameraPos, new Float32Array(cameraPos));
+
+      for (const body of bodies) {
+        drawBody(body, time);
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+    window.addEventListener('resize', resizeCanvas);
+  </script>
+</body>
+</html>
